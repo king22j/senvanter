@@ -3,54 +3,67 @@ import os
 import time
 from collections import Counter
 
-def get_price(item_name):
-    # Her eşya için piyasa fiyatını çeken fonksiyon
-    url = f"https://steamcommunity.com/market/priceoverview/"
-    params = {
-        'appid': 730,
-        'currency': 25, # 25 = TL (Dolar istersen 1 yap)
-        'market_hash_name': item_name
-    }
+def clean_price(price_str):
+    # "15,50 TL" veya "CLP$ 500" gibi metinleri sayıya çevirir
+    if not price_str or "Fiyat" in price_str:
+        return 0.0
     try:
-        # Steam'i yormamak için kısa bir bekleme
-        time.sleep(1.1) 
+        # Sadece rakamları ve virgül/noktayı tut
+        cleaned = "".join(c for c in price_str if c.isdigit() or c in ",.")
+        cleaned = cleaned.replace(",", ".")
+        # Birden fazla nokta varsa (binlik ayırıcı gibi) sonuncusunu tut
+        if cleaned.count('.') > 1:
+            parts = cleaned.split('.')
+            cleaned = "".join(parts[:-1]) + "." + parts[-1]
+        return float(cleaned)
+    except:
+        return 0.0
+
+def get_price_info(item_name):
+    url = "https://steamcommunity.com/market/priceoverview/"
+    params = {'appid': 730, 'currency': 25, 'market_hash_name': item_name}
+    try:
+        time.sleep(1.2) # Ban yememek için şart
         r = requests.get(url, params=params)
         if r.status_code == 200:
-            data = r.json()
-            return data.get('lowest_price', 'Fiyat Bulunamadı')
+            return r.json().get('lowest_price', '0')
     except:
-        return "N/A"
-    return "N/A"
+        return "0"
+    return "0"
 
 def start():
-    steam_id = os.getenv('STEAM_ID', 'BURAYA_ID_YAZ').strip()
+    steam_id = os.getenv('STEAM_ID', 'ID_YAZ').strip()
     inv_url = f"https://steamcommunity.com/inventory/{steam_id}/730/2?l=turkish&count=500"
     
     try:
-        inv_res = requests.get(inv_url)
-        if inv_res.status_code != 200:
-            print(f"Envanter çekilemedi. Hata: {inv_res.status_code}")
-            return
-
-        data = inv_res.json()
+        res = requests.get(inv_url)
+        data = res.json()
         desc_map = {d['classid']: d['market_hash_name'] for d in data.get('descriptions', [])}
         items = [desc_map.get(a['classid']) for a in data['assets'] if a['classid'] in desc_map]
         
         inventory_counts = Counter(items)
+        total_inventory_value = 0.0
         
-        print("\n" + "="*65)
-        print(f"{'EŞYA ADI (ADET)':<40} | {'BİRİM FİYAT':<15}")
-        print("-" * 65)
+        print("\n" + "="*70)
+        print(f"{'EŞYA ADI (ADET)':<40} | {'BİRİM':<12} | {'TOPLAM':<12}")
+        print("-" * 70)
 
         for name, count in sorted(inventory_counts.items()):
-            price = get_price(name) # Her benzersiz eşya için 1 kez fiyat sorar
-            print(f"{name} ({count})".strip()[:39].ljust(40) + f" | {price}")
+            price_str = get_price_info(name)
+            unit_price = clean_price(price_str)
+            item_total = unit_price * count
+            total_inventory_value += item_total
+            
+            # Satır yazdırma
+            display_name = f"{name} ({count})"[:39]
+            print(f"{display_name:<40} | {price_str:<12} | {item_total:>8.2f}")
 
-        print("="*65)
-        print("Not: Steam limitlerine takılmamak için fiyatlar 1 sn arayla çekiliyor.")
+        print("-" * 70)
+        print(f"{'GENEL TOPLAM DEĞER':<40} | {' ':12} | {total_inventory_value:>8.2f} TL")
+        print("="*70)
 
     except Exception as e:
-        print(f"Hata oluştu: {e}")
+        print(f"Hata: {e}")
 
 if __name__ == "__main__":
     start()
