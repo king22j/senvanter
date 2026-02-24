@@ -1,0 +1,28 @@
+name: Steam Inventory Checker
+
+on:
+  workflow_dispatch: # Manuel olarak butona basıp çalıştırmanı sağlar
+  schedule:
+    - cron: '0 0 * * *' # Her gün gece yarısı otomatik çalışır (isteğe bağlı)
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.9'
+
+    - name: Install dependencies
+      run: |
+        pip install -r requirements.txt
+
+    - name: Run script
+      env:
+        STEAM_ID: ${{ secrets.STEAM_ID }} # Güvenlik için Secret kullanıyoruz
+      run: python inventory_val.py
