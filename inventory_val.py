@@ -1,69 +1,126 @@
 import requests
 import os
 import time
+import argparse
 from collections import Counter
+from decimal import Decimal, InvalidOperation
 
-def clean_price(price_str):
-    # "15,50 TL" veya "CLP$ 500" gibi metinleri sayıya çevirir
-    if not price_str or "Fiyat" in price_str:
-        return 0.0
+# Para birimleri (güncel Steam market currency ID'leri)
+CURRENCY_MAP = {
+    'usd': {'id': 1,  'symbol': '$',   'name': 'USD'},
+    'eur': {'id': 3,  'symbol': '€',   'name': 'EUR'},
+    'try': {'id': 32, 'symbol': '₺',   'name': 'TRY'},
+    'rub': {'id': 5,  'symbol': '₽',   'name': 'RUB'},
+    # İstersen ekle: gbp:2, cad:4 vs.
+}
+
+def parse_price(price_str: str) -> Decimal:
+    """ '$12.34' veya '1 234,56 €' gibi string → Decimal """
+    if not price_str or price_str in ('—', 'Fiyat yok', 'N/A'):
+        return Decimal('0')
+    # Rakam + . , boşluk hariç her şeyi temizle
+    cleaned = ''.join(c for c in price_str if c.isdigit() or c in '.,')
+    cleaned = cleaned.replace(',', '.').replace(' ', '')
     try:
-        # Sadece rakamları ve virgül/noktayı tut
-        cleaned = "".join(c for c in price_str if c.isdigit() or c in ",.")
-        cleaned = cleaned.replace(",", ".")
-        # Birden fazla nokta varsa (binlik ayırıcı gibi) sonuncusunu tut
-        if cleaned.count('.') > 1:
-            parts = cleaned.split('.')
-            cleaned = "".join(parts[:-1]) + "." + parts[-1]
-        return float(cleaned)
-    except:
-        return 0.0
+        return Decimal(cleaned)
+    except InvalidOperation:
+        return Decimal('0')
 
-def get_price_info(item_name):
+
+def get_price(item_name: str, currency_id: int, price_cache: dict) -> tuple[str, Decimal]:
+    if item_name in price_cache:
+        return price_cache[item_name]
+
     url = "https://steamcommunity.com/market/priceoverview/"
-    params = {'appid': 730, 'currency': 25, 'market_hash_name': item_name}
+    params = {
+        'appid': 730,
+        'currency': currency_id,
+        'market_hash_name': item_name,
+    }
     try:
-        time.sleep(1.2) # Ban yememek için şart
-        r = requests.get(url, params=params)
-        if r.status_code == 200:
-            return r.json().get('lowest_price', '0')
-    except:
-        return "0"
-    return "0"
+        time.sleep(1.3)  # Rate limit için güvenli bekleme
+        r = requests.get(url, params=params, timeout=12)
+        if r.status_code != 200:
+            price_cache[item_name] = ("Hata", Decimal('0'))
+            return price_cache[item_name]
 
-def start():
-    steam_id = os.getenv('STEAM_ID', 'ID_YAZ').strip()
-    inv_url = f"https://steamcommunity.com/inventory/{steam_id}/730/2?l=turkish&count=500"
-    
-    try:
-        res = requests.get(inv_url)
-        data = res.json()
-        desc_map = {d['classid']: d['market_hash_name'] for d in data.get('descriptions', [])}
-        items = [desc_map.get(a['classid']) for a in data['assets'] if a['classid'] in desc_map]
-        
-        inventory_counts = Counter(items)
-        total_inventory_value = 0.0
-        
-        print("\n" + "="*70)
-        print(f"{'EŞYA ADI (ADET)':<40} | {'BİRİM':<12} | {'TOPLAM':<12}")
-        print("-" * 70)
+        data = r.json()
+        if not data.get('success', False):
+            price_cache[item_name] = ("Fiyat yok", Decimal('0'))
+            return price_cache[item_name]
 
-        for name, count in sorted(inventory_counts.items()):
-            price_str = get_price_info(name)
-            unit_price = clean_price(price_str)
-            item_total = unit_price * count
-            total_inventory_value += item_total
-            
-            # Satır yazdırma
-            display_name = f"{name} ({count})"[:39]
-            print(f"{display_name:<40} | {price_str:<12} | {item_total:>8.2f}")
-
-        print("-" * 70)
-        print(f"{'GENEL TOPLAM DEĞER':<40} | {' ':12} | {total_inventory_value:>8.2f} TL")
-        print("="*70)
+        lowest = data.get('lowest_price', '—')
+        parsed = parse_price(lowest)
+        price_cache[item_name] = (lowest, parsed)
+        return lowest, parsed
 
     except Exception as e:
-        print(f"Hata: {e}")
+        print(f"  ! Hata ({item_name}): {e}")
+        price_cache[item_name] = ("N/A", Decimal('0'))
+        return price_cache[item_name]
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Steam CS2 Envanter Değer Hesaplayıcı")
+    parser.add_argument('--currency', choices=['usd', 'try', 'eur', 'rub'], default='usd',
+                        help="Para birimi: usd (default), try, eur, rub")
+    args = parser.parse_args()
+
+    curr = CURRENCY_MAP[args.currency]
+    currency_id = curr['id']
+    symbol = curr['symbol']
+    curr_name = curr['name']
+
+    steam_id = os.getenv('STEAM_ID') or input("Steam ID'nizi girin (7656119...): ").strip()
+    if not steam_id or len(steam_id) < 10:
+        print("Geçerli Steam ID girin!")
+        return
+
+    inv_url = f"https://steamcommunity.com/inventory/{steam_id}/730/2?l=english&count=5000"
+
+    try:
+        print("Envanter çekiliyor...")
+        inv_res = requests.get(inv_url, timeout=15)
+        inv_res.raise_for_status()
+        data = inv_res.json()
+    except Exception as e:
+        print(f"Envanter alınamadı: {e}")
+        return
+
+    desc_map = {d['classid']: d['market_hash_name'] for d in data.get('descriptions', [])}
+    items = [desc_map.get(a['classid']) for a in data['assets'] if a['classid'] in desc_map]
+    inventory_counts = Counter(item for item in items if item)  # Boşları at
+
+    if not inventory_counts:
+        print("Envanter boş veya çekilemedi.")
+        return
+
+    price_cache = {}  # Cache: isim → (str fiyat, Decimal fiyat)
+    total_value = Decimal('0')
+
+    print("\n" + "═" * 85)
+    print(f"{'EŞYA ADI (ADET)':<50} | {'BİRİM FİYAT':<18} | {'TOPLAM':<15}")
+    print("─" * 85)
+
+    for name, count in sorted(inventory_counts.items()):
+        price_str, price_dec = get_price(name, currency_id, price_cache)
+        subtotal = price_dec * count
+        total_value += subtotal
+
+        count_display = f"({count})" if count > 1 else ""
+        line = f"{name} {count_display:<8} | {price_str:<18} | {symbol}{subtotal:,.2f}"
+        # Türkçe format: nokta → boşluk, virgül → nokta
+        formatted = line.replace(',', ' ').replace('.', ',')
+        print(formatted[:84])  # Çok uzun isimleri kırp
+
+    print("═" * 85)
+    total_formatted = f"{symbol}{total_value:,.2f}".replace(',', ' ').replace('.', ',')
+    print(f"                    TOPLAM ENVANTER DEĞERİ ({curr_name}):  {total_formatted}")
+    print(f"\nNot: {len(inventory_counts)} farklı eşya • {len(price_cache)} fiyat sorgusu yapıldı • Cache kullanıldı")
+
+    if len(items) >= 4900:
+        print("UYARI: 5000 eşya limitine yaklaşıldı, bazı eşyalar eksik olabilir (Steam API sınırlaması)")
+
 
 if __name__ == "__main__":
-    start()
+    main()
